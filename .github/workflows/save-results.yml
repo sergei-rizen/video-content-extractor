@@ -1,0 +1,111 @@
+name: Save Results to Google Drive
+
+on:
+  workflow_run:
+    workflows: ["Process Videos from Google Drive"]
+    types:
+      - completed
+
+jobs:
+  save-to-drive:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+        
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+          
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install google-api-python-client google-auth-httplib2 google-auth-oauthlib
+          
+      - name: Create service account key file
+        run: |
+          echo '${{ secrets.GOOGLE_CREDENTIALS }}' > service-account.json
+          
+      - name: Download artifacts
+        uses: dawidd6/action-download-artifact@v2
+        with:
+          workflow: process-videos.yml
+          name: video-content
+          path: output/
+          
+      - name: Create upload script
+        run: |
+          cat > upload_to_drive.py << 'EOF'
+          import os
+          import glob
+          from google.oauth2 import service_account
+          from googleapiclient.discovery import build
+          from googleapiclient.http import MediaFileUpload
+          
+          # Load credentials
+          credentials = service_account.Credentials.from_service_account_file(
+              'service-account.json',
+              scopes=['https://www.googleapis.com/auth/drive']
+          )
+          
+          # Build the Drive API client
+          drive_service = build('drive', 'v3', credentials=credentials)
+          
+          # Create a folder for results if it doesn't exist
+          folder_name = 'Video Content Extractions'
+          query = f"name='{folder_name}' and mimeType='application/vnd.google-apps.folder' and trashed=false"
+          results = drive_service.files().list(q=query).execute()
+          folders = results.get('files', [])
+          
+          if not folders:
+              # Create the folder
+              folder_metadata = {
+                  'name': folder_name,
+                  'mimeType': 'application/vnd.google-apps.folder'
+              }
+              folder = drive_service.files().create(body=folder_metadata, fields='id').execute()
+              folder_id = folder.get('id')
+          else:
+              folder_id = folders[0]['id']
+          
+          # Upload each file in the output directory
+          for file_path in glob.glob('output/*'):
+              file_name = os.path.basename(file_path)
+              
+              # Check if file already exists
+              query = f"name='{file_name}' and '{folder_id}' in parents and trashed=false"
+              results = drive_service.files().list(q=query).execute()
+              files = results.get('files', [])
+              
+              file_metadata = {
+                  'name': file_name,
+                  'parents': [folder_id]
+              }
+              
+              media = MediaFileUpload(
+                  file_path,
+                  resumable=True
+              )
+              
+              if files:
+                  # Update existing file
+                  file_id = files[0]['id']
+                  updated_file = drive_service.files().update(
+                      fileId=file_id,
+                      body=file_metadata,
+                      media_body=media
+                  ).execute()
+                  print(f"Updated: {file_name}")
+              else:
+                  # Upload new file
+                  created_file = drive_service.files().create(
+                      body=file_metadata,
+                      media_body=media,
+                      fields='id'
+                  ).execute()
+                  print(f"Uploaded: {file_name}")
+          EOF
+          
+      - name: Run upload script
+        run: python upload_to_drive.py
