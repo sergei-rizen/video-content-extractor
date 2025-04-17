@@ -20,24 +20,26 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install google-api-python-client google-auth-httplib2 google-auth-oauthlib google.generativeai
+          pip install google-api-python-client google-auth-httplib2 google-auth-oauthlib google.generativeai markdown
 
       - name: Create service account key file
         run: |
           echo '${{ secrets.GOOGLE_CREDENTIALS }}' > service-account.json
 
-      - name: Create processing script
+      - name: Create combined processing script
         run: |
-          cat > process_videos.py << 'EOF'
+          cat > process_and_upload.py << 'EOF'
           import os
           import json
           import time
+          import glob
           from datetime import datetime, timedelta
           from google.oauth2 import service_account
           from googleapiclient.discovery import build
-          from googleapiclient.http import MediaIoBaseDownload
+          from googleapiclient.http import MediaIoBaseDownload, MediaFileUpload
           import io
           import google.generativeai as genai
+          import markdown
 
           # Configure the Gemini API
           genai.configure(api_key=os.environ["GEMINI_API_KEY"])
@@ -45,11 +47,31 @@ jobs:
           # Load credentials
           credentials = service_account.Credentials.from_service_account_file(
               'service-account.json',
-              scopes=['https://www.googleapis.com/auth/drive.readonly']
+              scopes=['https://www.googleapis.com/auth/drive']
           )
 
           # Build the Drive API client
           drive_service = build('drive', 'v3', credentials=credentials)
+
+          # Create output directory
+          os.makedirs('output', exist_ok=True)
+
+          # Create a folder for results if it doesn't exist
+          folder_name = 'Video Content Extractions'
+          query = f"name='{folder_name}' and mimeType='application/vnd.google-apps.folder' and trashed=false"
+          results = drive_service.files().list(q=query).execute()
+          folders = results.get('files', [])
+          
+          if not folders:
+              # Create the folder
+              folder_metadata = {
+                  'name': folder_name,
+                  'mimeType': 'application/vnd.google-apps.folder'
+              }
+              folder = drive_service.files().create(body=folder_metadata, fields='id').execute()
+              folder_id = folder.get('id')
+          else:
+              folder_id = folders[0]['id']
 
           # Check for new video files in the last day
           time_threshold = datetime.utcnow() - timedelta(days=1)
@@ -143,23 +165,55 @@ jobs:
                   
                   response = model.generate_content([prompt, file_obj])
                   
-                  # Create output directory
-                  os.makedirs('output', exist_ok=True)
-                  
-                  # Save the content
-                  output_md = f"output/{file_name.split('.')[0]}.md"
+                  # Save the markdown content
+                  base_name = file_name.split('.')[0]
+                  output_md = f"output/{base_name}.md"
                   with open(output_md, "w") as f:
                       f.write(response.text)
                       
-                  # Convert to HTML (optional)
-                  try:
-                      import markdown
-                      html_content = markdown.markdown(response.text)
-                      output_html = f"output/{file_name.split('.')[0]}.html"
-                      with open(output_html, "w") as f:
-                          f.write(html_content)
-                  except Exception as e:
-                      print(f"Error converting to HTML: {e}")
+                  # Convert to HTML
+                  html_content = markdown.markdown(response.text)
+                  output_html = f"output/{base_name}.html"
+                  with open(output_html, "w") as f:
+                      f.write(html_content)
+                  
+                  # Upload markdown to Google Drive
+                  md_metadata = {
+                      'name': f"{base_name}.md",
+                      'parents': [folder_id]
+                  }
+                  
+                  md_media = MediaFileUpload(
+                      output_md,
+                      mimetype='text/markdown',
+                      resumable=True
+                  )
+                  
+                  md_file = drive_service.files().create(
+                      body=md_metadata,
+                      media_body=md_media,
+                      fields='id'
+                  ).execute()
+                  print(f"Uploaded markdown: {base_name}.md")
+                  
+                  # Upload HTML to Google Drive
+                  html_metadata = {
+                      'name': f"{base_name}.html",
+                      'parents': [folder_id]
+                  }
+                  
+                  html_media = MediaFileUpload(
+                      output_html,
+                      mimetype='text/html',
+                      resumable=True
+                  )
+                  
+                  html_file = drive_service.files().create(
+                      body=html_metadata,
+                      media_body=html_media,
+                      fields='id'
+                  ).execute()
+                  print(f"Uploaded HTML: {base_name}.html")
                   
                   # Mark as processed
                   processed_files.append(file_id)
@@ -175,13 +229,7 @@ jobs:
               json.dump(processed_files, f)
           EOF
 
-      - name: Run the processing script
+      - name: Run the combined script
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-        run: python process_videos.py
-
-      - name: Upload results as artifacts
-        uses: actions/upload-artifact@v1
-        with:
-          name: video-content
-          path: output/
+        run: python process_and_upload.py
