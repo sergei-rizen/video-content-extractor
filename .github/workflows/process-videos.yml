@@ -1,0 +1,187 @@
+name: Process Videos from Google Drive
+
+on:
+  schedule:
+    - cron: '*/30 * * * *'  # Run every 30 minutes
+  workflow_dispatch:  # Allow manual triggering
+
+jobs:
+  check-for-videos:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install google-api-python-client google-auth-httplib2 google-auth-oauthlib google.generativeai
+
+      - name: Create service account key file
+        run: |
+          echo '${{ secrets.GOOGLE_CREDENTIALS }}' > service-account.json
+
+      - name: Create processing script
+        run: |
+          cat > process_videos.py << 'EOF'
+          import os
+          import json
+          import time
+          from datetime import datetime, timedelta
+          from google.oauth2 import service_account
+          from googleapiclient.discovery import build
+          from googleapiclient.http import MediaIoBaseDownload
+          import io
+          import google.generativeai as genai
+
+          # Configure the Gemini API
+          genai.configure(api_key=os.environ["GEMINI_API_KEY"])
+
+          # Load credentials
+          credentials = service_account.Credentials.from_service_account_file(
+              'service-account.json',
+              scopes=['https://www.googleapis.com/auth/drive.readonly']
+          )
+
+          # Build the Drive API client
+          drive_service = build('drive', 'v3', credentials=credentials)
+
+          # Check for new video files in the last day
+          time_threshold = datetime.utcnow() - timedelta(days=1)
+          time_str = time_threshold.strftime('%Y-%m-%dT%H:%M:%S')
+
+          # Search query to find video files
+          query = f"mimeType contains 'video/' and modifiedTime > '{time_str}'"
+
+          # List files matching the query
+          results = drive_service.files().list(
+              q=query,
+              fields="files(id, name, mimeType)"
+          ).execute()
+
+          files = results.get('files', [])
+          processed_files = []
+
+          if os.path.exists('processed_files.json'):
+              with open('processed_files.json', 'r') as f:
+                  processed_files = json.load(f)
+
+          for file in files:
+              file_id = file['id']
+              file_name = file['name']
+              
+              # Skip if already processed
+              if file_id in processed_files:
+                  print(f"Skipping already processed file: {file_name}")
+                  continue
+                  
+              print(f"Processing file: {file_name}")
+              
+              # Download the file
+              request = drive_service.files().get_media(fileId=file_id)
+              file_stream = io.BytesIO()
+              downloader = MediaIoBaseDownload(file_stream, request)
+              done = False
+              
+              while not done:
+                  status, done = downloader.next_chunk()
+                  print(f"Download {int(status.progress() * 100)}%")
+              
+              # Save to temp file
+              video_path = f"temp_{file_name}"
+              with open(video_path, "wb") as f:
+                  f.write(file_stream.getvalue())
+                  
+              # Upload to Gemini
+              print("Uploading to Gemini API...")
+              with open(video_path, "rb") as f:
+                  video_data = f.read()
+                  
+              try:
+                  # Upload file to Gemini
+                  file_obj = genai.upload_file(video_data, mime_type=file['mimeType'])
+                  
+                  # Wait for processing
+                  print("Waiting for processing (3 minutes)...")
+                  time.sleep(180)
+                  
+                  # Generate content with Gemini
+                  model = genai.GenerativeModel('gemini-2.0-flash')
+                  
+                  prompt = """
+                  You are an expert educational content creator specializing in transforming video content into structured learning materials. Your task is to analyze this video and create a comprehensive educational resource that captures the essence of this one-on-one learning session.
+
+                  Your output should:
+
+                  1. Begin with an executive summary (3-5 sentences) of the main educational concepts covered
+                  2. Create a detailed outline with clear hierarchical headings (H1, H2, H3) using markdown formatting
+                  3. Under each section, extract and organize:
+                     - Core concepts and theories presented
+                     - Practical methodologies or techniques demonstrated
+                     - Key insights or revelations from the instructor
+                     - Notable examples or case studies mentioned
+                     - Important definitions or terminology introduced
+
+                  4. Include a 'Key Takeaways' section with actionable bullet points
+                  5. Create a 'Further Learning' section suggesting how these concepts could be explored further
+
+                  Format your response using rich markdown including:
+                  - **Bold text** for emphasizing important concepts
+                  - *Italic text* for definitions or special terminology
+                  - > Blockquotes for direct quotes from the video
+                  - Bullet points and numbered lists for organizing information
+                  - Tables if appropriate for comparing concepts
+                  - Code blocks if any technical content is presented
+
+                  Make the content educational, detailed, and suitable for someone wanting to thoroughly understand and apply the knowledge shared in this one-on-one learning session.
+                  """
+                  
+                  response = model.generate_content([prompt, file_obj])
+                  
+                  # Create output directory
+                  os.makedirs('output', exist_ok=True)
+                  
+                  # Save the content
+                  output_md = f"output/{file_name.split('.')[0]}.md"
+                  with open(output_md, "w") as f:
+                      f.write(response.text)
+                      
+                  # Convert to HTML (optional)
+                  try:
+                      import markdown
+                      html_content = markdown.markdown(response.text)
+                      output_html = f"output/{file_name.split('.')[0]}.html"
+                      with open(output_html, "w") as f:
+                          f.write(html_content)
+                  except Exception as e:
+                      print(f"Error converting to HTML: {e}")
+                  
+                  # Mark as processed
+                  processed_files.append(file_id)
+                  
+              except Exception as e:
+                  print(f"Error processing file: {e}")
+              
+              # Clean up
+              os.remove(video_path)
+
+          # Save processed files list
+          with open('processed_files.json', 'w') as f:
+              json.dump(processed_files, f)
+          EOF
+
+      - name: Run the processing script
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: python process_videos.py
+
+      - name: Upload results as artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: video-content
+          path: output/
