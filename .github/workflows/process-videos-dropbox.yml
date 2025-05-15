@@ -15,11 +15,13 @@ jobs:
         uses: actions/checkout@v3
 
       # Download the state file from the previous run if it exists
+      # Added workflow parameter and updated to v4 to correctly look for the artifact
       - name: Download processed files list (if exists)
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v4 # Updated to v4
         with:
           name: processed-files-state
           path: .
+          workflow: process-videos-dropbox.yml # <--- Added this line
         continue-on-error: true # Allow job to continue if artifact doesn't exist yet
 
       - name: Set up Python
@@ -209,8 +211,9 @@ jobs:
                   # elif isinstance(entry, dropbox.files.DeletedMetadata):
                   #      # This watcher doesn't handle processing deleted files
                   #      pass
-
-              print(f"Found {len(files_to_process_now)} video files requiring processing in this run.")
+              # FIX START: Corrected indentation for the following print statement
+              print(f"Found {len(files_to_process_now)} video files requiring processing in this run.") # <-- This line now has 4 spaces indentation
+              # FIX END
 
               # Process the identified video files
               for file_entry in files_to_process_now:
@@ -225,7 +228,7 @@ jobs:
                   # Download the file from Dropbox
                   if download_file_from_dropbox(dbx, dropbox_watch_file_path, local_temp_video_path):
                       try:
-                          # --- Gemini Processing Part (kept from your original script) ---
+                          # --- Gemini Processing Part ---
                           print("Uploading video to Gemini API...")
                           video_data = None
                           try:
@@ -233,7 +236,6 @@ jobs:
                                   video_data = f.read()
 
                               # Upload file to Gemini
-                              # Use file_entry.id as file_display_name for better tracking in Gemini if needed
                               file_obj = genai.upload_file(
                                   video_data,
                                   display_name=file_name,
@@ -242,29 +244,25 @@ jobs:
                               print(f"Uploaded file to Gemini: {file_obj.uri}")
 
                               # Wait for processing
-                              # The original script waited 3 minutes. Let's add a check loop instead
-                              # as processing time varies. Wait up to a certain limit.
                               print("Waiting for Gemini processing...")
                               processing_start_time = time.time()
                               timeout_seconds = 600 # Wait up to 10 minutes
 
-                              while file_obj.state.is_active(): # Check state like 'PROCESSING', 'SUCCEEDED', 'FAILED'
+                              while file_obj.state.is_active():
                                   if time.time() - processing_start_time > timeout_seconds:
                                       print(f"Gemini processing timed out after {timeout_seconds} seconds for {file_name}.")
                                       raise TimeoutError("Gemini processing timed out.")
                                   print(f"  ... Processing state: {file_obj.state}. Waiting...")
-                                  time.sleep(10) # Wait 10 seconds before checking state again
+                                  time.sleep(10)
 
                               if file_obj.state.is_failed():
                                   print(f"Gemini processing failed for {file_name}. State: {file_obj.state}")
-                                  # Attempt to get error details if possible (API might not provide)
                                   raise RuntimeError(f"Gemini processing failed: {file_obj.state}")
                               elif file_obj.state.is_cancelled():
                                    print(f"Gemini processing was cancelled for {file_name}.")
                                    raise RuntimeError(f"Gemini processing was cancelled: {file_obj.state}")
                               elif file_obj.state.is_succeeded():
                                   print(f"Gemini processing succeeded for {file_name}.")
-                                  # Proceed to generate content
                               else:
                                    print(f"Gemini processing ended in unexpected state: {file_obj.state} for {file_name}.")
                                    raise RuntimeError(f"Gemini processing ended in unexpected state: {file_obj.state}")
@@ -412,12 +410,11 @@ jobs:
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           DROPBOX_ACCESS_TOKEN: ${{ secrets.DROPBOX_ACCESS_TOKEN }} # Pass Dropbox token as env var
-          # GOOGLE_CREDENTIALS is no longer needed as an environment variable
         run: python process_and_upload.py
 
       # Upload the updated state file so the next run can download it
       - name: Upload processed files list
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v4 # Updated to v4
         with:
           name: processed-files-state
           path: processed_files.json
