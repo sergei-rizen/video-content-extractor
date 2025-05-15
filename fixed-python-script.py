@@ -1,5 +1,3 @@
---- START OF FILE fixed-python-script-3.py --- # Renamed to reflect changes
-
 import os
 import json
 import time
@@ -14,6 +12,8 @@ import mimetypes
 
 # --- Import missing datetime objects ---
 from datetime import datetime, timedelta
+from google.generativeai import GenerationConfig # Imported GenerationConfig
+
 
 # --- Configuration ---
 # Get secrets from environment variables passed by GitHub Actions
@@ -323,18 +323,21 @@ try:
                 if file_obj: # Ensure file_obj was successfully created
                    try:
                        FileState = type(file_obj).State
-                       terminal_states = [FileState.SUCCEEDED, FileState.FAILED, FileState.CANCELLED]
+                       # Using FileState.State.FAILED/CANCELLED is redundant if FileState is already the State enum
+                       # The correct way is [FileState.SUCCEEDED, FileState.FAILED, FileState.CANCELLED]
+                       # Let's simplify this to use the numeric values directly as they are more reliable
+                       # based on the observed behavior and previous fixes.
+                       pass # We accessed it successfully, but will use numeric values below
                    except Exception as e:
                        print(f"Error accessing State enum from file_obj type: {e}. Will rely on raw state values for wait condition.")
-                       # If enum access fails, fall back to using raw integer state values
                        FileState = None # Ensure FileState is None if access failed
 
 
-                # Use the FileState enum values if accessible, otherwise use raw integer values
+                # Use raw integer state values for robustness, as Enum access might be tricky.
                 # Raw state values: 1: QUEUED, 2: SUCCEEDED, 3: FAILED, 4: CANCELLED
-                succeeded_state_value = FileState.SUCCEEDED if FileState else 2
-                failed_state_value = FileState.FAILED if FileState else 3
-                cancelled_state_value = FileState.CANCELLED if FileState else 4
+                succeeded_state_value = 2
+                failed_state_value = 3
+                cancelled_state_value = 4
                 terminal_state_values_numeric = [succeeded_state_value, failed_state_value, cancelled_state_value]
 
 
@@ -371,7 +374,7 @@ try:
 
 
                 # After the loop, file_obj.state IS one of the terminal state values
-                # Check the final processing state based on the raw state value or Enum if accessible
+                # Check the final processing state based on the raw state value
                 if file_obj.state == succeeded_state_value:
                     print(f"Gemini processing succeeded for {file_name}.")
                     # Content generation follows this block
@@ -429,7 +432,8 @@ try:
                         if not response_text and hasattr(candidate, 'safety_ratings') and candidate.safety_ratings:
                             print(f"Gemini generation blocked due to safety policy. Ratings: {candidate.safety_ratings}")
                             # You might want to log more details or handle specific block reasons
-                            raise RuntimeError("Gemini content generation blocked by safety policy.")
+                            # Don't raise an exception immediately here, let the rest of the code handle the empty response_text
+                            pass # Continue to the check below
 
 
                     if response_text: # Process the extracted text
@@ -473,17 +477,19 @@ try:
                         print(f"Gemini generated empty or invalid text content for {file_name}. No output files generated.")
                         # If Gemini generates no text, maybe it couldn't process the video?
                         # It's not marked processed, so it will be attempted again on the next run.
-                        # Consider deleting the Gemini file object if it didn't produce text?
-                        # try: genai.delete_file(file_obj.name); print(f"Deleted Gemini file {file_obj.name} after empty response.")
-                        # except: pass # Ignore errors during cleanup
+                        # Clean up Gemini file object if it exists and wasn't deleted by failed processing check
+                        if file_obj and hasattr(file_obj, 'name'):
+                            try: genai.delete_file(file_obj.name)
+                            except Exception as delete_e: print(f"Error deleting Gemini file {file_obj.name} after empty response: {delete_e}")
 
 
                 except Exception as content_gen_e:
                     print(f"Error during Gemini content generation, saving, or upload for {file_name}: {content_gen_e}")
                     # Don't mark as processed
-                    # Consider deleting the Gemini file object if content generation fails?
-                    # try: genai.delete_file(file_obj.name); print(f"Deleted Gemini file {file_obj.name} after generation error.")
-                    # except: pass # Ignore errors during cleanup
+                    # Clean up Gemini file object if it exists and wasn't deleted by failed processing check
+                    if file_obj and hasattr(file_obj, 'name'):
+                         try: genai.delete_file(file_obj.name)
+                         except Exception as delete_e: print(f"Error deleting Gemini file {file_obj.name} after generation error: {delete_e}")
 
 
             except Exception as gemini_process_e:
@@ -511,6 +517,7 @@ try:
                 base_name = os.path.splitext(file_name)[0]
                 output_md_local_path = os.path.join(LOCAL_OUTPUT_DIR, f"{base_name}.md")
                 output_html_local_path = os.path.join(LOCAL_OUTPUT_DIR, f"{base_name}.html")
+                # Check if files exist before trying to remove
                 if os.path.exists(output_md_local_path):
                    try: os.remove(output_md_local_path)
                    except OSError as e: print(f"Error removing local file {output_md_local_path}: {e}")
@@ -571,5 +578,3 @@ except Exception as e:
     # This catches any other unexpected errors that weren't handled in the specific blocks
     print(f"\nAn unexpected error occurred during script execution: {e}")
     exit(1) # Exit with error code
-
---- END OF FILE fixed-python-script-3.py ---
