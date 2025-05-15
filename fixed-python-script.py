@@ -10,6 +10,9 @@ import markdown
 # import fnmatch
 import mimetypes # Added for MIME type guessing
 
+# --- Import missing datetime objects ---
+from datetime import datetime, timedelta # Added this line
+
 # --- Configuration ---
 # Get secrets from environment variables passed by GitHub Actions
 DROPBOX_ACCESS_TOKEN = os.environ.get("DROPBOX_ACCESS_TOKEN")
@@ -195,7 +198,8 @@ try:
     for entry in entries:
         # We only care about files (not folders) and process videos among them
         # Also check modification time to only process recent files
-        if isinstance(entry, dropbox.files.FileMetadata) and entry.server_modified.replace(tzinfo=None) > time_threshold:
+        # Added check that server_modified exists and is a datetime object
+        if isinstance(entry, dropbox.files.FileMetadata) and hasattr(entry, 'server_modified') and isinstance(entry.server_modified, datetime) and entry.server_modified.replace(tzinfo=None) > time_threshold:
             # Check if it's a video file by extension
             if is_video_file(entry.name):
                  # Check if this file path has been processed before *in this run*
@@ -210,7 +214,9 @@ try:
                       print(f"Skipping already processed video file: {entry.path_display} (Already in local list)")
             # Non-video files or folders are skipped implicitly
         elif isinstance(entry, dropbox.files.FileMetadata):
-             print(f"Skipping old file: {entry.path_display} (Modified: {entry.server_modified})")
+             # File is a FileMetadata but didn't pass the time check or server_modified check
+             print(f"Skipping old or invalid metadata file: {entry.path_display} (Modified: {getattr(entry, 'server_modified', 'N/A')})")
+        # Folders are implicitly skipped by the initial isinstance check
 
 
     print(f"Found {len(files_to_process_now)} video files requiring processing in this run.")
@@ -240,9 +246,8 @@ try:
                         video_data = f.read()
 
                     # --- Determine MIME type robustly ---
-                    # Safely get mime_type, check if it exists and is not None/empty
                     mime_type_to_use = None
-                    # Safely check if the attribute exists *and* has a value
+                    # Safely check if the attribute exists and has a value
                     if hasattr(file_entry, 'mime_type') and file_entry.mime_type:
                         mime_type_to_use = file_entry.mime_type
                         print(f"Using MIME type from Dropbox metadata: {mime_type_to_use}")
@@ -259,7 +264,6 @@ try:
 
                     # Upload file to Gemini
                     # Pass mime_type_to_use (could be None if determination failed)
-                    # This is the line that previously failed due to the missing attribute
                     file_obj = genai.upload_file(
                         video_data,
                         display_name=file_name,
@@ -412,8 +416,8 @@ try:
                         # except: pass # Ignore errors during cleanup
 
 
-                except Exception as gemini_upload_e:
-                     print(f"Error uploading video to Gemini or waiting for processing for {file_name}: {gemini_upload_e}")
+                except Exception as gemini_process_e:
+                     print(f"Error uploading video to Gemini or waiting for processing for {file_name}: {gemini_process_e}")
                      # Don't mark as processed
                      # Clean up the file uploaded to Gemini if it failed during Gemini processing/wait
                      if file_obj and hasattr(file_obj, 'name'):
@@ -468,6 +472,9 @@ try:
 # These catch errors during initial Dropbox connection or the main file listing.
 # Specific processing errors per file are caught inside the loop.
 # AuthError is caught earlier during connection attempt.
+# except dropbox.exceptions.AuthError: # This block is redundant now, handled above
+#     print("\nError: Invalid Dropbox access token. Please check your secret.")
+#     exit(1) # Exit with error code to fail the GitHub Actions job
 except dropbox.exceptions.ApiError as e:
      print(f"\nDropbox API Error during initial folder check or listing: {e}")
      # More specific error handling already inside the initial folder check.
@@ -476,14 +483,19 @@ except dropbox.exceptions.ApiError as e:
          path_error = e.error.get_path()
          if path_error.is_not_found():
              print(f"Error: Dropbox watch folder '{DROPBOX_WATCH_FOLDER_PATH}' not found or accessible for the provided token during listing.")
+             # Exit as this is a critical configuration issue
+             exit(1)
          elif path_error.is_insufficient_permissions():
               print(f"Error: Insufficient permissions to list Dropbox watch folder '{DROPBOX_WATCH_FOLDER_PATH}'. Check token scopes.")
+              exit(1)
+         # Add other path error types if needed
          else:
              print(f"Unhandled Dropbox Path Error during listing: {e}")
      elif e.error.is_rate_limit():
           print(f"Dropbox Rate Limit Error during listing. Details: {e}. The job might retry depending on workflow settings.")
           # Don't necessarily exit 1 on rate limit if GitHub Actions retries the job automatically
           # For simplicity, keeping exit(1) for now, but consider softer handling if needed.
+          exit(1)
      else:
          print(f"Unhandled Dropbox API Error during listing: {e}")
      exit(1) # Exit with error code on API error
