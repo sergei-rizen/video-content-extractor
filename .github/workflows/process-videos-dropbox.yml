@@ -194,7 +194,7 @@ jobs:
 
               files_to_process_now = []
               for entry in entries:
-                  # We only care about files
+                  # We only care about files and process videos among them
                   if isinstance(entry, dropbox.files.FileMetadata):
                       # Check if it's a video file by extension
                       if is_video_file(entry.name):
@@ -204,16 +204,11 @@ jobs:
                                 files_to_process_now.append(entry)
                            else:
                                 print(f"Skipping already processed video file: {entry.path_display}")
-                      else:
-                           # print(f"Ignoring non-video file: {entry.path_display}") # Optional: too noisy
-                  # elif isinstance(entry, dropbox.files.FolderMetadata):
-                  #      print(f"Ignoring folder entry: {entry.path_display}") # Optional: too noisy
-                  # elif isinstance(entry, dropbox.files.DeletedMetadata):
-                  #      # This watcher doesn't handle processing deleted files
-                  #      pass
-          # FIX START: Corrected indentation for the following print statement
-              print(f"Found {len(files_to_process_now)} video files requiring processing in this run.") # <-- This line now has 4 spaces indentation
-          # FIX END
+                      # No explicit else needed here for non-video files - they are simply not added to files_to_process_now
+
+              # FIX START: Corrected indentation for the following print statement to be at Python level 4
+              print(f"Found {len(files_to_process_now)} video files requiring processing in this run.")
+              # FIX END
 
               # Process the identified video files
               for file_entry in files_to_process_now:
