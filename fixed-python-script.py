@@ -2,12 +2,10 @@ import os
 import json
 import time
 import glob
-import dropbox # Added dropbox library
-# Removed google imports for uploading results
+import dropbox
 import google.generativeai as genai
 import markdown
-import fnmatch # Added for file extension matching
-
+import fnmatch
 
 # --- Configuration ---
 # Get secrets from environment variables passed by GitHub Actions
@@ -15,13 +13,15 @@ DROPBOX_ACCESS_TOKEN = os.environ["DROPBOX_ACCESS_TOKEN"]
 GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
 
 # The path to the folder in your Dropbox account to WATCH.
+# BASED on your request, this should be the SAME as the output folder.
 # Remember Dropbox paths start with '/'. If using 'App folder',
 # paths are relative to the app's root, so '/' is the app folder root.
-DROPBOX_WATCH_FOLDER_PATH = '/Videos To Process' # <<< --- **CONFIGURE THIS WATCH FOLDER** --- >>>
+# <<< --- **FIXED THIS WATCH FOLDER PATH** --- >>>
+DROPBOX_WATCH_FOLDER_PATH = '/Omni/WW/Entities/DC. Omni Coaching/Meetings/Recordings' # NOW WATCHES THE SPECIFIED FOLDER
 
 # The path to the folder in your Dropbox account where RESULTS should be saved.
 # Use the path you provided: Dropbox/Omni/WW/Entities/DC. Omni Coaching/Meetings/Recordings
-DROPBOX_OUTPUT_FOLDER_PATH = '/Omni/WW/Entities/DC. Omni Coaching/Meetings/Recordings' # <<< --- **CONFIGURE THIS OUTPUT FOLDER** --- >>>
+DROPBOX_OUTPUT_FOLDER_PATH = '/Omni/WW/Entities/DC. Omni Coaching/Meetings/Recordings' # This remains the same
 
 # List of video file extensions to look for (case-insensitive comparison will be used)
 VIDEO_EXTENSIONS = ['.mp4', '.mov', '.avi', '.mkv', '.webm', '.flv'] # <<< --- **CONFIGURE THIS** --- >>>
@@ -41,7 +41,8 @@ LOCAL_OUTPUT_DIR = 'output'
 os.makedirs(LOCAL_OUTPUT_DIR, exist_ok=True)
 
 # Load list of processed files (using Dropbox paths as identifier)
-# This file is persisted between runs using GitHub Actions artifacts
+# This file is persisted between runs using GitHub Actions artifacts (IF enabled)
+# Since artifact handling was removed, this will always start empty
 PROCESSED_FILES_STATE_FILE = 'processed_files.json'
 processed_file_paths = set() # Use a set for efficient lookups
 
@@ -130,22 +131,26 @@ try:
     except dropbox.exceptions.ApiError as e:
         if e.error.is_path() and e.error.get_path().is_not_found():
             print(f"Error: Dropbox watch folder '{DROPBOX_WATCH_FOLDER_PATH}' not found or accessible.")
-            exit(1) # Fail the job
+            # This is a critical configuration error, exit the job
+            exit(1)
         else:
-            raise # Re-raise other API errors
+            # Re-raise other API errors like permissions, rate limit, etc.
+            raise
+    except Exception as e:
+        print(f"An unexpected error occurred when checking Dropbox watch folder {DROPBOX_WATCH_FOLDER_PATH}: {e}")
+        exit(1) # Exit on other unexpected errors
+
 
     # Check if output folder exists and is accessible (or can be created implicitly by upload)
-    # Uploading will create the necessary parent folders if they don't exist,
-    # so explicit check is less critical unless you need to handle specific permissions issues.
+    # Uploading will create the necessary parent folders if they don't exist.
+    # We don't need an explicit check here.
 
 
     # List files in the Dropbox watch folder
     # Using list_folder without a cursor or time filter means we get the current state
-    # The processed_file_paths set handles skipping already processed files.
+    # The processed_file_paths set handles skipping already processed files (if artifact works).
     print(f"Listing files in '{DROPBOX_WATCH_FOLDER_PATH}'...")
     # recursive=False: Only list top-level items
-    # include_media_info=False, include_has_explicit_content=False, include_mounted_folders=False
-    # keeps the response smaller unless you need that info.
     result = dbx.files_list_folder(path=DROPBOX_WATCH_FOLDER_PATH, recursive=False)
     entries = result.entries
     print(f"Found {len(entries)} entries in the watch folder.")
@@ -157,14 +162,16 @@ try:
             # Check if it's a video file by extension
             if is_video_file(entry.name):
                  # Check if this file path has been processed before
+                 # NOTE: Without artifact persistence, this check won't prevent reprocessing across runs.
                  if entry.path_display not in processed_file_paths:
                       print(f"Identified new/unprocessed video file: {entry.path_display}")
                       files_to_process_now.append(entry)
                  else:
+                      # This message will only appear if processed_files.json *somehow* exists in the runner's workspace
+                      # or if a file was processed *earlier in the same run*.
                       print(f"Skipping already processed video file: {entry.path_display}")
             # No explicit else needed here for non-video files - they are simply not added to files_to_process_now
 
-    # Fixed indentation for the following print statement to be at Python level 4
     print(f"Found {len(files_to_process_now)} video files requiring processing in this run.")
 
     # Process the identified video files
@@ -173,11 +180,13 @@ try:
         file_name = file_entry.name
         # Create a temporary local path to download the file
         # Use a path inside the runner's workspace, /tmp might have permissions issues or be small
-        local_temp_video_path = os.path.join('.', f"temp_video_{file_entry.id}_{file_name}") # Use file ID to minimize conflicts
+        local_temp_video_path = os.path.join('.', LOCAL_OUTPUT_DIR, f"temp_video_{file_entry.id}_{file_name}") # Use LOCAL_OUTPUT_DIR for temps too
 
         print(f"\n--- Processing {file_name} ---")
 
         # Download the file from Dropbox
+        # Ensure local output directory exists before trying to download into it
+        os.makedirs(LOCAL_OUTPUT_DIR, exist_ok=True)
         if download_file_from_dropbox(dbx, dropbox_watch_file_path, local_temp_video_path):
             try:
                 # --- Gemini Processing Part ---
@@ -193,35 +202,40 @@ try:
                         display_name=file_name,
                         mime_type=file_entry.mime_type # Use MIME type from Dropbox metadata
                     )
-                    print(f"Uploaded file to Gemini: {file_obj.uri}")
+                    print(f"Uploaded file to Gemini: {file_obj.uri}, State: {file_obj.state}")
 
                     # Wait for processing
                     print("Waiting for Gemini processing...")
                     processing_start_time = time.time()
                     timeout_seconds = 600 # Wait up to 10 minutes
 
-                    while file_obj.state.is_active():
+                    # Refresh file object status until processed
+                    while True:
+                        file_obj = genai.get_file(file_obj.name)
+                        print(f"  ... State: {file_obj.state}, Elapsed: {int(time.time() - processing_start_time)}s")
+                        if file_obj.state.is_terminal(): # SUCCEEDED, FAILED, CANCELLED
+                            break
                         if time.time() - processing_start_time > timeout_seconds:
-                            print(f"Gemini processing timed out after {timeout_seconds} seconds for {file_name}.")
-                            raise TimeoutError("Gemini processing timed out.")
-                        print(f"  ... Processing state: {file_obj.state}. Waiting...")
-                        time.sleep(10)
+                             print(f"Gemini processing timed out after {timeout_seconds} seconds for {file_name}. Current state: {file_obj.state}")
+                             raise TimeoutError("Gemini processing timed out.")
 
-                    if file_obj.state.is_failed():
-                        print(f"Gemini processing failed for {file_name}. State: {file_obj.state}")
-                        raise RuntimeError(f"Gemini processing failed: {file_obj.state}")
+                        time.sleep(10) # Wait before checking again
+
+                    if file_obj.state.is_succeeded():
+                        print(f"Gemini processing succeeded for {file_name}.")
+                    elif file_obj.state.is_failed():
+                        print(f"Gemini processing failed for {file_name}. State: {file_obj.state}, Error: {file_obj.error}") # Include error detail
+                        raise RuntimeError(f"Gemini processing failed: {file_obj.state} - {file_obj.error}")
                     elif file_obj.state.is_cancelled():
                          print(f"Gemini processing was cancelled for {file_name}.")
                          raise RuntimeError(f"Gemini processing was cancelled: {file_obj.state}")
-                    elif file_obj.state.is_succeeded():
-                        print(f"Gemini processing succeeded for {file_name}.")
-                    else:
+                    else: # Should not happen with is_terminal() check, but for safety
                          print(f"Gemini processing ended in unexpected state: {file_obj.state} for {file_name}.")
                          raise RuntimeError(f"Gemini processing ended in unexpected state: {file_obj.state}")
 
 
                     # Generate content with Gemini
-                    model = genai.GenerativeModel('gemini-2.0-flash') # Or 'gemini-1.5-flash-latest' if available and preferred
+                    model = genai.GenerativeModel('gemini-2.0-flash')
 
                     prompt = """
                     You are an expert educational content creator specializing in transforming video content into structured learning materials. Your task is to analyze this video and create a comprehensive educational resource that captures the essence of this one-on-one learning session.
@@ -275,29 +289,35 @@ try:
                         dropbox_md_target_path = os.path.join(DROPBOX_OUTPUT_FOLDER_PATH, f"{base_name}.md")
                         dropbox_html_target_path = os.path.join(DROPBOX_OUTPUT_FOLDER_PATH, f"{base_name}.html")
 
+                        # Ensure output folder structure exists in Dropbox before uploading (optional, upload_file handles this)
+                        # dbx.files_create_folder_v2(os.path.dirname(dropbox_md_target_path), autorename=True) # This would create parents
+
                         if upload_file_to_dropbox(dbx, output_md_local_path, dropbox_md_target_path):
                             print(f"Successfully uploaded {os.path.basename(output_md_local_path)} to Dropbox.")
                         else:
                             print(f"Failed to upload {os.path.basename(output_md_local_path)} to Dropbox.")
+                            # Decide how to handle upload failure - maybe raise exception?
 
                         if upload_file_to_dropbox(dbx, output_html_local_path, dropbox_html_target_path):
                              print(f"Successfully uploaded {os.path.basename(output_html_local_path)} to Dropbox.")
                         else:
                             print(f"Failed to upload {os.path.basename(output_html_local_path)} to Dropbox.")
+                            # Decide how to handle upload failure
 
 
-                        # --- Update Processed State ---
-                        # Use the Dropbox file path from the WATCH folder as the identifier
+                        # --- Update Processed State (within THIS run) ---
+                        # Add the Dropbox file path from the WATCH folder to the set
+                        # Note: This state is NOT persisted across runs without artifact handling.
                         processed_file_paths.add(dropbox_watch_file_path)
-                        print(f"Marked '{dropbox_watch_file_path}' as processed.")
+                        print(f"Marked '{dropbox_watch_file_path}' as processed (for this run).")
 
                     else:
-                         print(f"Gemini generated no text content for {file_name}.")
+                         print(f"Gemini generated no text content for {file_name}. No output files generated.")
                          # Decide if you still want to mark as processed or retry later
 
                 except Exception as processing_e:
-                    print(f"Error during Gemini processing or Dropbox upload for {file_name}: {processing_e}")
-                    # Don't mark as processed so it can be retried on the next run
+                    print(f"Error during Gemini processing or output saving/upload for {file_name}: {processing_e}")
+                    # Don't mark as processed so it could theoretically be retried on the next run (but won't skip if it fails here)
 
             finally:
                 # Clean up the local temporary video file
@@ -305,44 +325,48 @@ try:
                     os.remove(local_temp_video_path)
                     print(f"Removed temporary local video file: {local_temp_video_path}")
 
-                # Clean up local output files after upload (optional, but good practice)
+                # Clean up local output files after attempted upload (optional, but good practice)
                 base_name = os.path.splitext(file_name)[0]
                 output_md_local_path = os.path.join(LOCAL_OUTPUT_DIR, f"{base_name}.md")
                 output_html_local_path = os.path.join(LOCAL_OUTPUT_DIR, f"{base_name}.html")
                 if os.path.exists(output_md_local_path):
-                    os.remove(output_md_local_path)
+                   try: os.remove(output_md_local_path)
+                   except OSError as e: print(f"Error removing local file {output_md_local_path}: {e}")
                 if os.path.exists(output_html_local_path):
-                    os.remove(output_html_local_path)
-                print("Cleaned up local output files.")
+                   try: os.remove(output_html_local_path)
+                   except OSError as e: print(f"Error removing local file {output_html_local_path}: {e}")
+                print("Cleaned up local temporary files.")
 
 
         else:
             print(f"Skipping processing for {file_name} due to download failure.")
             # Don't mark as processed so it can be retried
 
-    # --- Save Updated Processed State ---
+
+    # --- Save Updated Processed State (will be lost without artifact upload) ---
+    # This part is still in the script, but its effect is limited to the current run.
+    # It's harmless to keep it, might be useful if you re-implement state persistence later.
     print(f"\nSaving updated processed file list ({len(processed_file_paths)} entries)...")
     try:
         # Convert set back to list for JSON serialization
         with open(PROCESSED_FILES_STATE_FILE, 'w') as f:
             json.dump(list(processed_file_paths), f)
-        print(f"Successfully saved processed file list to {PROCESSED_FILES_STATE_FILE}.")
+        print(f"Successfully saved processed file list locally (will be lost without artifact upload).")
     except Exception as e:
-        print(f"Error saving processed file list to {PROCESSED_FILES_STATE_FILE}: {e}")
+        print(f"Error saving processed file list locally: {e}")
 
 
 except dropbox.exceptions.AuthError:
-    print("Error: Invalid Dropbox access token. Please check your secret.")
+    print("\nError: Invalid Dropbox access token. Please check your secret.")
     exit(1) # Exit with error code to fail the GitHub Actions job
 except dropbox.exceptions.ApiError as e:
-     print(f"Dropbox API Error: {e}")
+     print(f"\nDropbox API Error: {e}")
      if e.error.is_path():
          path_error = e.error.get_path()
          if path_error.is_not_found():
-             print(f"Error: A specified Dropbox path was not found. Watch folder: '{DROPBOX_WATCH_FOLDER_PATH}', Output Folder: '{DROPBOX_OUTPUT_FOLDER_PATH}'")
+             print(f"Error: A specified Dropbox path was not found. Watch folder: '{DROPBOX_WATCH_FOLDER_PATH}'")
          elif path_error.is_restricted_content():
-             print(f"Error: Restricted content issue with a Dropbox path. Watch folder: '{DROPBOX_WATCH_FOLDER_PATH}', Output Folder: '{DROPBOX_OUTPUT_FOLDER_PATH}'")
-         # Add other path error types if needed
+             print(f"Error: Restricted content issue with a Dropbox path. Watch folder: '{DROPBOX_WATCH_FOLDER_PATH}'")
          else:
              print(f"Unhandled Dropbox Path Error: {e}")
      elif e.error.is_rate_limit():
@@ -352,5 +376,5 @@ except dropbox.exceptions.ApiError as e:
      exit(1) # Exit with error code on API error
 
 except Exception as e:
-    print(f"An unexpected error occurred: {e}")
+    print(f"\nAn unexpected error occurred during Dropbox interaction or initial setup: {e}")
     exit(1) # Exit with error code
