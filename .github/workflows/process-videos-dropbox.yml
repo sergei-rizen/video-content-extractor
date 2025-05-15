@@ -211,9 +211,9 @@ jobs:
                   # elif isinstance(entry, dropbox.files.DeletedMetadata):
                   #      # This watcher doesn't handle processing deleted files
                   #      pass
-              # FIX START: Corrected indentation for the following print statement
+          # FIX START: Corrected indentation for the following print statement
               print(f"Found {len(files_to_process_now)} video files requiring processing in this run.") # <-- This line now has 4 spaces indentation
-              # FIX END
+          # FIX END
 
               # Process the identified video files
               for file_entry in files_to_process_now:
