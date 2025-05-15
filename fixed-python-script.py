@@ -49,7 +49,10 @@ if not GEMINI_API_KEY:
 try:
     genai.configure(api_key=GEMINI_API_KEY)
     # Optional: Test Gemini connection/auth if needed, e.g., list models
-    # for model in genai.list_models(): print(model.name)
+    # print("Available Gemini models:")
+    # for model in genai.list_models():
+    #    print(f"- {model.name}")
+    # print("-" * 20)
 except Exception as e:
     print(f"Error configuring Gemini API: {e}")
     exit(1)
@@ -234,186 +237,191 @@ try:
         # Download the file from Dropbox
         # Ensure local output directory exists before trying to download into it
         os.makedirs(LOCAL_OUTPUT_DIR, exist_ok=True) # Ensure output directory is created
+        # Pass the local_temp_video_path to the download function
         if download_file_from_dropbox(dbx, dropbox_watch_file_path, local_temp_video_path):
             file_obj = None # Initialize Gemini file object variable
 
             try:
                 # --- Gemini Processing Part ---
                 print("Uploading video to Gemini API...")
-                video_data = None
-                try:
-                    with open(local_temp_video_path, "rb") as f:
-                        video_data = f.read()
-
-                    # --- Determine MIME type robustly ---
-                    mime_type_to_use = None
-                    # Safely check if the attribute exists and has a value
-                    if hasattr(file_entry, 'mime_type') and file_entry.mime_type:
-                        mime_type_to_use = file_entry.mime_type
-                        print(f"Using MIME type from Dropbox metadata: {mime_type_to_use}")
+                # --- Determine MIME type robustly ---
+                mime_type_to_use = None
+                # Safely check if the attribute exists and has a value
+                if hasattr(file_entry, 'mime_type') and file_entry.mime_type:
+                    mime_type_to_use = file_entry.mime_type
+                    print(f"Using MIME type from Dropbox metadata: {mime_type_to_use}")
+                else:
+                    # Attribute doesn't exist or is falsey, guess from the file extension
+                    guessed_mime_type, _ = mimetypes.guess_type(file_name)
+                    if guessed_mime_type and 'video/' in guessed_mime_type: # Ensure it looks like a video type
+                        mime_type_to_use = guessed_mime_type
+                        print(f"Guessed MIME type from extension: {mime_type_to_use}")
                     else:
-                        # Attribute doesn't exist or is falsey, guess from the file extension
-                        guessed_mime_type, _ = mimetypes.guess_type(file_name)
-                        if guessed_mime_type and 'video/' in guessed_mime_type: # Ensure it looks like a video type
-                            mime_type_to_use = guessed_mime_type
-                            print(f"Guessed MIME type from extension: {mime_type_to_use}")
-                        else:
-                            # Final fallback/warning - Let Gemini try to infer or potentially fail
-                            print(f"Warning: Could not determine confident video MIME type for {file_name}. Proceeding without explicit MIME type (Gemini might reject).")
-                            # mime_type_to_use remains None here, letting genai.upload_file handle it
+                        # Final fallback/warning - Let Gemini try to infer or potentially fail
+                        print(f"Warning: Could not determine confident video MIME type for {file_name}. Proceeding without explicit MIME type (Gemini might reject).")
+                        # mime_type_to_use remains None here, letting genai.upload_file handle it
 
-                    # Upload file to Gemini
-                    # Pass mime_type_to_use (could be None if determination failed)
-                    file_obj = genai.upload_file(
-                        video_data,
-                        display_name=file_name,
-                        mime_type=mime_type_to_use # Pass the determined MIME type (or None)
-                    )
-                    print(f"Uploaded file to Gemini: {file_obj.uri}, State: {file_obj.state}")
 
-                    # Wait for processing to complete
-                    print("Waiting for Gemini processing...")
-                    processing_start_time = time.time()
-                    timeout_seconds = 600 # Wait up to 10 minutes for Gemini processing
+                # Upload file to Gemini
+                # Pass the *path* to the downloaded file, not the bytes
+                # This is the fix for the 'argument should be a str object' error
+                file_obj = genai.upload_file(
+                    path=local_temp_video_path, # <--- Pass the local file path here
+                    display_name=file_name,
+                    mime_type=mime_type_to_use # Pass the determined MIME type (or None)
+                )
+                print(f"Uploaded file to Gemini: {file_obj.uri}, State: {file_obj.state}")
 
-                    # Refresh file object status until processed
-                    while True:
-                        # Added a check to ensure file_obj is valid before trying genai.get_file
-                        if not file_obj or not hasattr(file_obj, 'name'):
-                             print("Error: Gemini file_obj is invalid after upload.")
-                             raise RuntimeError("Gemini file object invalid after upload.")
+                # Wait for processing to complete
+                print("Waiting for Gemini processing...")
+                processing_start_time = time.time()
+                timeout_seconds = 600 # Wait up to 10 minutes for Gemini processing
 
-                        file_obj = genai.get_file(file_obj.name) # Get the latest state
-                        print(f"  ... State: {file_obj.state}, Elapsed: {int(time.time() - processing_start_time)}s")
-                        if file_obj.state.is_terminal(): # SUCCEEDED, FAILED, CANCELLED
-                            break
-                        if time.time() - processing_start_time > timeout_seconds:
-                             print(f"Gemini processing timed out after {timeout_seconds} seconds for {file_name}. Current state: {file_obj.state}")
-                             raise TimeoutError(f"Gemini processing timed out for {file_name}. Current state: {file_obj.state}")
+                # Refresh file object status until processed
+                while True:
+                    # Added a check to ensure file_obj is valid before trying genai.get_file
+                    if not file_obj or not hasattr(file_obj, 'name'):
+                         print("Error: Gemini file_obj is invalid after upload.")
+                         raise RuntimeError("Gemini file object invalid after upload.")
 
-                        time.sleep(15) # Wait longer between checks (was 10s, 15s is safer for longer processing)
-
-                    # Check the final processing state
-                    if file_obj.state.is_succeeded():
-                        print(f"Gemini processing succeeded for {file_name}.")
-                    elif file_obj.state.is_failed():
-                        error_message = file_obj.error.message if hasattr(file_obj, 'error') and file_obj.error else 'N/A'
-                        print(f"Gemini processing failed for {file_name}. State: {file_obj.state}, Error: {error_message}")
-                        # Attempt to delete the file from Gemini if possible
-                        try:
-                           genai.delete_file(file_obj.name)
-                           print(f"Deleted failed Gemini file: {file_obj.name}.")
-                        except Exception as delete_e:
-                           print(f"Error deleting failed Gemini file {file_obj.name}: {delete_e}")
-                        raise RuntimeError(f"Gemini processing failed: {file_obj.state} - {error_message}")
-                    elif file_obj.state.is_cancelled():
-                         print(f"Gemini processing was cancelled for {file_name}. State: {file_obj.state}")
-                         # Attempt to delete the file from Gemini if possible
-                         try:
-                            genai.delete_file(file_obj.name)
-                            print(f"Deleted cancelled Gemini file: {file_obj.name}.")
-                         except Exception as delete_e:
-                            print(f"Error deleting cancelled Gemini file {file_obj.name}: {delete_e}")
-                         raise RuntimeError(f"Gemini processing was cancelled: {file_obj.state}")
-                    else: # Should not happen with is_terminal() check, but for safety
-                         print(f"Gemini processing ended in unexpected state: {file_obj.state} for {file_name}.")
-                         # Attempt to delete the file from Gemini if possible
-                         try:
-                            genai.delete_file(file_obj.name)
-                            print(f"Deleted unexpected state Gemini file: {file_obj.name}.")
-                         except Exception as delete_e:
-                            print(f"Error deleting unexpected state Gemini file {file_obj.name}: {delete_e}")
-                         raise RuntimeError(f"Gemini processing ended in unexpected state: {file_obj.state}")
-
-                    # --- Generate content with Gemini ---
-                    # This step only runs if Gemini processing succeeded
-                    print("Generating content with Gemini...")
-                    model = genai.GenerativeModel('gemini-2.0-flash')
-
-                    prompt = """
-                    You are an expert educational content creator specializing in transforming video content into structured learning materials. Your task is to analyze this video and create a comprehensive educational resource that captures the essence of this one-on-one learning session.
-
-                    Your output should:
-
-                    1. Begin with an executive summary (3-5 sentences) of the main educational concepts covered
-                    2. Create a detailed outline with clear hierarchical headings (H1, H2, H3) using markdown formatting
-                    3. Under each section, extract and organize:
-                       - Core concepts and theories presented
-                       - Practical methodologies or techniques demonstrated
-                       - Key insights or revelations from the instructor
-                       - Notable examples or case studies mentioned
-                       - Important definitions or terminology introduced
-
-                    4. Include a 'Key Takeaways' section with actionable bullet points
-                    5. Create a 'Further Learning' section suggesting how these concepts could be explored further
-
-                    Format your response using rich markdown including:
-                    - **Bold text** for emphasizing important concepts
-                    - *Italic text* for definitions or special terminology
-                    - > Blockquotes for direct quotes from the video
-                    - Bullet points (-) and numbered lists for organizing information
-                    - Tables if appropriate for comparing concepts
-                    - Code blocks if any technical content is presented
-
-                    Make the content educational, detailed, and suitable for someone wanting to thoroughly understand and apply the knowledge shared in this one-on-one learning session.
-                    """
-
-                    # Add error handling for content generation
+                    # Added safety check for potential rate limits or transient errors getting file status
                     try:
-                        response = model.generate_content([prompt, file_obj])
+                        file_obj = genai.get_file(file_obj.name) # Get the latest state
+                    except Exception as get_file_e:
+                         print(f"Warning: Error getting Gemini file status for {file_obj.name}: {get_file_e}. Retrying...")
+                         time.sleep(10) # Wait a bit longer before retrying status check
+                         continue # Try getting status again
 
-                        # Check if response contains text
-                        if response and response.text: # Check if response object and text attribute exist
-                            base_name = os.path.splitext(file_name)[0] # Get filename without extension
-                            output_md_local_path = os.path.join(LOCAL_OUTPUT_DIR, f"{base_name}.md")
-                            output_html_local_path = os.path.join(LOCAL_OUTPUT_DIR, f"{base_name}.html")
+                    print(f"  ... State: {file_obj.state}, Elapsed: {int(time.time() - processing_start_time)}s")
+                    if file_obj.state.is_terminal(): # SUCCEEDED, FAILED, CANCELLED
+                        break
+                    if time.time() - processing_start_time > timeout_seconds:
+                         print(f"Gemini processing timed out after {timeout_seconds} seconds for {file_name}. Current state: {file_obj.state}")
+                         raise TimeoutError(f"Gemini processing timed out for {file_name}. Current state: {file_obj.state}")
 
-                            # Save the markdown content locally
-                            with open(output_md_local_path, "w", encoding='utf-8') as f: # Use utf-8 encoding
-                                f.write(response.text)
-                            print(f"Saved markdown locally: {output_md_local_path}")
+                    time.sleep(15) # Wait longer between checks (was 10s, 15s is safer for longer processing)
 
-                            # Convert to HTML and save locally
-                            html_content = markdown.markdown(response.text)
-                            with open(output_html_local_path, "w", encoding='utf-8') as f: # Use utf-8 encoding
-                                f.write(html_content)
-                            print(f"Saved HTML locally: {output_html_local_path}")
+                # Check the final processing state
+                if file_obj.state.is_succeeded():
+                    print(f"Gemini processing succeeded for {file_name}.")
+                elif file_obj.state.is_failed():
+                    error_message = file_obj.error.message if hasattr(file_obj, 'error') and file_obj.error else 'N/A'
+                    print(f"Gemini processing failed for {file_name}. State: {file_obj.state}, Error: {error_message}")
+                    # Attempt to delete the file from Gemini if possible
+                    try:
+                       genai.delete_file(file_obj.name)
+                       print(f"Deleted failed Gemini file: {file_obj.name}.")
+                    except Exception as delete_e:
+                       print(f"Error deleting failed Gemini file {file_obj.name}: {delete_e}")
+                    raise RuntimeError(f"Gemini processing failed: {file_obj.state} - {error_message}")
+                elif file_obj.state.is_cancelled():
+                     print(f"Gemini processing was cancelled for {file_name}. State: {file_obj.state}")
+                     # Attempt to delete the file from Gemini if possible
+                     try:
+                        genai.delete_file(file_obj.name)
+                        print(f"Deleted cancelled Gemini file: {file_obj.name}.")
+                     except Exception as delete_e:
+                        print(f"Error deleting cancelled Gemini file {file_obj.name}: {delete_e}")
+                     raise RuntimeError(f"Gemini processing was cancelled: {file_obj.state}")
+                else: # Should not happen with is_terminal() check, but for safety
+                     print(f"Gemini processing ended in unexpected state: {file_obj.state} for {file_name}.")
+                     # Attempt to delete the file from Gemini if possible
+                     try:
+                        genai.delete_file(file_obj.name)
+                        print(f"Deleted unexpected state Gemini file: {file_obj.name}.")
+                     except Exception as delete_e:
+                        print(f"Error deleting unexpected state Gemini file {file_obj.name}: {delete_e}")
+                     raise RuntimeError(f"Gemini processing ended in unexpected state: {file_obj.state}")
 
-                            # --- Upload results to Dropbox ---
-                            print("Attempting to upload results to Dropbox...")
-                            # Construct the target paths in Dropbox - using the Output folder
-                            dropbox_md_target_path = os.path.join(DROPBOX_OUTPUT_FOLDER_PATH, f"{base_name}.md")
-                            dropbox_html_target_path = os.path.join(DROPBOX_OUTPUT_FOLDER_PATH, f"{base_name}.html")
+                # --- Generate content with Gemini ---
+                # This step only runs if Gemini processing succeeded
+                print("Generating content with Gemini...")
+                model = genai.GenerativeModel('gemini-2.0-flash')
 
-                            upload_success_md = upload_file_to_dropbox(dbx, output_md_local_path, dropbox_md_target_path)
-                            upload_success_html = upload_file_to_dropbox(dbx, output_html_local_path, dropbox_html_target_path)
+                prompt = """
+                You are an expert educational content creator specializing in transforming video content into structured learning materials. Your task is to analyze this video and create a comprehensive educational resource that captures the essence of this one-on-one learning session.
 
-                            if upload_success_md and upload_success_html:
-                                print(f"Successfully uploaded both results for {file_name} to Dropbox.")
-                                # --- Update Processed State (within THIS run) ---
-                                # Add the Dropbox file path from the WATCH folder as the identifier
-                                # Note: This state is NOT persisted across runs without artifact handling.
-                                processed_file_paths.add(dropbox_watch_file_path)
-                                print(f"Marked '{dropbox_watch_file_path}' as processed (for this run).")
-                            else:
-                                print(f"Upload failed for one or both output files for {file_name}. NOT marking as fully processed in this run.")
-                                # The file will be attempted again on the next run (due to no state persistence)
+                Your output should:
 
+                1. Begin with an executive summary (3-5 sentences) of the main educational concepts covered
+                2. Create a detailed outline with clear hierarchical headings (H1, H2, H3) using markdown formatting
+                3. Under each section, extract and organize:
+                   - Core concepts and theories presented
+                   - Practical methodologies or techniques demonstrated
+                   - Key insights or revelations from the instructor
+                   - Notable examples or case studies mentioned
+                   - Important definitions or terminology introduced
+
+                4. Include a 'Key Takeaways' section with actionable bullet points
+                5. Create a 'Further Learning' section suggesting how these concepts could be explored further
+
+                Format your response using rich markdown including:
+                - **Bold text** for emphasizing important concepts
+                - *Italic text* for definitions or special terminology
+                - > Blockquotes for direct quotes from the video
+                - Bullet points (-) and numbered lists for organizing information
+                - Tables if appropriate for comparing concepts
+                - Code blocks if any technical content is presented
+
+                Make the content educational, detailed, and suitable for someone wanting to thoroughly understand and apply the knowledge shared in this one-on-one learning session.
+                """
+
+                # Add error handling for content generation
+                try:
+                    response = model.generate_content([prompt, file_obj])
+
+                    # Check if response contains text
+                    if response and response.text: # Check if response object and text attribute exist
+                        base_name = os.path.splitext(file_name)[0] # Get filename without extension
+                        output_md_local_path = os.path.join(LOCAL_OUTPUT_DIR, f"{base_name}.md")
+                        output_html_local_path = os.path.join(LOCAL_OUTPUT_DIR, f"{base_name}.html")
+
+                        # Save the markdown content locally
+                        with open(output_md_local_path, "w", encoding='utf-8') as f: # Use utf-8 encoding
+                            f.write(response.text)
+                        print(f"Saved markdown locally: {output_md_local_path}")
+
+                        # Convert to HTML and save locally
+                        html_content = markdown.markdown(response.text)
+                        with open(output_html_local_path, "w", encoding='utf-8') as f: # Use utf-8 encoding
+                            f.write(html_content)
+                        print(f"Saved HTML locally: {output_html_local_path}")
+
+                        # --- Upload results to Dropbox ---
+                        print("Attempting to upload results to Dropbox...")
+                        # Construct the target paths in Dropbox - using the Output folder
+                        dropbox_md_target_path = os.path.join(DROPBOX_OUTPUT_FOLDER_PATH, f"{base_name}.md")
+                        dropbox_html_target_path = os.path.join(DROPBOX_OUTPUT_FOLDER_PATH, f"{base_name}.html")
+
+                        upload_success_md = upload_file_to_dropbox(dbx, output_md_local_path, dropbox_md_target_path)
+                        upload_success_html = upload_file_to_dropbox(dbx, output_html_local_path, dropbox_html_target_path)
+
+                        if upload_success_md and upload_success_html:
+                            print(f"Successfully uploaded both results for {file_name} to Dropbox.")
+                            # --- Update Processed State (within THIS run) ---
+                            # Add the Dropbox file path from the WATCH folder as the identifier
+                            # Note: This state is NOT persisted across runs without artifact handling.
+                            processed_file_paths.add(dropbox_watch_file_path)
+                            print(f"Marked '{dropbox_watch_file_path}' as processed (for this run).")
                         else:
-                            print(f"Gemini generated empty or invalid text content for {file_name}. No output files generated.")
-                            # If Gemini generates no text, maybe it couldn't process the video?
-                            # It's not marked processed, so it will be attempted again on the next run.
-                            # Consider deleting the Gemini file object if it didn't produce text?
-                            # try: genai.delete_file(file_obj.name); print(f"Deleted Gemini file {file_obj.name} after empty response.")
-                            # except: pass
+                            print(f"Upload failed for one or both output files for {file_name}. NOT marking as fully processed in this run.")
+                            # The file will be attempted again on the next run (due to no state persistence)
+
+                    else:
+                        print(f"Gemini generated empty or invalid text content for {file_name}. No output files generated.")
+                        # If Gemini generates no text, maybe it couldn't process the video?
+                        # It's not marked processed, so it will be attempted again on the next run.
+                        # Consider deleting the Gemini file object if it didn't produce text?
+                        # try: genai.delete_file(file_obj.name); print(f"Deleted Gemini file {file_obj.name} after empty response.")
+                        # except: pass
 
 
-                    except Exception as content_gen_e:
-                        print(f"Error during Gemini content generation, saving, or upload for {file_name}: {content_gen_e}")
-                        # Don't mark as processed
-                        # Consider deleting the Gemini file object if content generation fails?
-                        # try: genai.delete_file(file_obj.name); print(f"Deleted Gemini file {file_obj.name} after generation error.")
-                        # except: pass # Ignore errors during cleanup
+                except Exception as content_gen_e:
+                    print(f"Error during Gemini content generation, saving, or upload for {file_name}: {content_gen_e}")
+                    # Don't mark as processed
+                    # Consider deleting the Gemini file object if content generation fails?
+                    # try: genai.delete_file(file_obj.name); print(f"Deleted Gemini file {file_obj.name} after generation error.")
+                    # except: pass # Ignore errors during cleanup
 
 
                 except Exception as gemini_process_e:
@@ -472,9 +480,6 @@ try:
 # These catch errors during initial Dropbox connection or the main file listing.
 # Specific processing errors per file are caught inside the loop.
 # AuthError is caught earlier during connection attempt.
-# except dropbox.exceptions.AuthError: # This block is redundant now, handled above
-#     print("\nError: Invalid Dropbox access token. Please check your secret.")
-#     exit(1) # Exit with error code to fail the GitHub Actions job
 except dropbox.exceptions.ApiError as e:
      print(f"\nDropbox API Error during initial folder check or listing: {e}")
      # More specific error handling already inside the initial folder check.
