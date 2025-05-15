@@ -20,6 +20,7 @@ jobs:
         with:
           name: processed-files-state
           path: .
+          workflow: process-videos-dropbox.yml # <--- ADD THIS LINE
         continue-on-error: true # Allow job to continue if artifact doesn't exist yet
 
       - name: Set up Python
