@@ -1,0 +1,10 @@
+{
+  "model_name": "gemini-1.5-pro-16m",
+  "generation_config": {
+    "temperature": 0.3,
+    "top_p": 0.9,
+    "stop_sequences": ["\n**"],
+    "max_output_tokens": null
+  },
+  "processing_timeout_seconds": 1800
+}
