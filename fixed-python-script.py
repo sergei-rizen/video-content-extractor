@@ -147,9 +147,9 @@ if '[INSERT_EXAMPLE_TEXT_HERE]' in final_prompt_string:
     print("Warning: Placeholder [INSERT_EXAMPLE_TEXT_HERE] not found in template. Prompt might be malformed.")
 
 # Extract Gemini settings from config
-GEMINI_MODEL_NAME = gemini_config.get("model_name", "gemini-2.0-flash")
+GEMINI_MODEL_NAME = gemini_config.get("model_name", "gemini-1.5-pro-latest") # Use the default confirmed working model
 raw_gen_config = gemini_config.get("generation_config", {})
-PROCESSING_TIMEOUT_SECONDS = gemini_config.get("processing_timeout_seconds", 600)
+PROCESSING_TIMEOUT_SECONDS = gemini_config.get("processing_timeout_seconds", 1800) # Default to 30 min
 
 # Create GenerationConfig object
 try:
@@ -165,7 +165,7 @@ except Exception as e:
 try:
     genai.configure(api_key=GEMINI_API_KEY)
     print("Successfully configured Gemini API.")
-    # *** Diagnostic code to list models removed ***
+    # Diagnostic code to list models previously here, now removed
 
 except Exception as e:
     print(f"Error configuring Gemini API: {e}")
@@ -328,35 +328,63 @@ try:
                     )
 
                     response_text = None
-                    content_blocked = False
+                    content_blocked = False # Flag to track if content was blocked by safety filters
 
                     if response and hasattr(response, 'candidates') and response.candidates:
                          candidate = response.candidates[0]
 
-                         # Check safety ratings first
-                         if hasattr(candidate, 'safety_ratings') and candidate.safety_ratings:
-                             for rating in candidate.safety_ratings:
-                                 if hasattr(rating, 'probability') and rating.probability >= 4: # Assuming 4+ indicates blocked
-                                     print(f"Gemini generation likely blocked for category {rating.category}: {rating.probability}.")
-                                     content_blocked = True
-                                     break
+                         # --- Check finish reason - often indicates filtering ---
+                         # Use string comparison for robustness across library versions
+                         if hasattr(candidate, 'finish_reason'):
+                              finish_reason_str = str(candidate.finish_reason) # Convert Enum to string
+                              print(f"Candidate finish reason: {finish_reason_str}")
+                              # Common finish reasons for filtering include SAFETY, RECITATION, OTHER
+                              if 'SAFETY' in finish_reason_str or 'RECITATION' in finish_reason_str:
+                                   print("Candidate finished due to safety or recitation policy.")
+                                   content_blocked = True
+                                   # Log safety ratings if available, for detail
+                                   if hasattr(candidate, 'safety_ratings') and candidate.safety_ratings:
+                                        print("Safety ratings:")
+                                        for rating in candidate.safety_ratings:
+                                             # Check if probability is AT_LEAST_MEDIUM or higher (usually indicates potential issue)
+                                             # Value 4=AT_LEAST_MEDIUM, 5=HARM_BLOCKED (for probability Enum)
+                                             prob_value = rating.probability # This is an Enum value
+                                             print(f"  - {rating.category}: {prob_value} (Probability Enum Value)")
+                                             if prob_value >= 4: # Check against Enum value >= AT_LEAST_MEDIUM
+                                                 print("    (Likely blocked due to high probability)")
 
-                         # If not blocked, attempt to extract text
+
+                         # --- If not blocked by finish reason, check individual ratings more thoroughly ---
+                         # This catches cases where finish_reason isn't explicitly safety but ratings are high
+                         if not content_blocked and hasattr(candidate, 'safety_ratings') and candidate.safety_ratings:
+                              print("Checking individual safety ratings (second pass)...")
+                              for rating in candidate.safety_ratings:
+                                   prob_value = rating.probability # This is an Enum value
+                                   if prob_value >= 4: # Check if probability is AT_LEAST_MEDIUM or higher
+                                       print(f"  - {rating.category}: {prob_value} (Probability Enum Value) (Potential block indicated)")
+                                       content_blocked = True # Mark as blocked if any rating is AT_LEAST_MEDIUM or higher
+                              if content_blocked:
+                                  print("Content marked as blocked due to high safety rating probabilities.")
+
+
+                         # --- If not blocked, attempt to extract text ---
                          if not content_blocked and hasattr(candidate, 'content') and candidate.content and hasattr(candidate.content, 'parts') and candidate.content.parts:
                              try:
                                  response_text = ''.join(p.text for p in candidate.content.parts if hasattr(p, 'text'))
+                                 # Check for minimal text length - if text is super short, maybe it's also a form of filtering or failed generation
+                                 if response_text and len(response_text.strip()) < 50: # Require at least 50 characters for valid content
+                                      print(f"Warning: Generated text is very short ({len(response_text.strip())} chars), possibly incomplete or minimal output.")
+                                      # Treat minimal text as blocked for saving/uploading purposes, but don't raise error
+                                      content_blocked = True # Treat as blocked so it doesn't save the empty/minimal markdown
+                                      response_text = None # Clear the text so it goes to the 'else' block
+
+
                              except Exception as text_extract_e:
                                  print(f"Warning: Error extracting text from response parts: {text_extract_e}")
-                                 response_text = None
+                                 response_text = None # Ensure None if extraction fails
 
-                         if not response_text and hasattr(candidate, 'safety_ratings') and candidate.safety_ratings and not content_blocked:
-                             # This handles cases where no text parts are found but it wasn't explicitly blocked yet
-                             # It might be due to internal API issues or malformed 'parts'
-                             print("Warning: Gemini response has no text parts, but was not explicitly blocked.")
-                             # Decide if you want to treat this as a blocked event or a generation failure
-                             # For now, we'll treat it similar to an empty response below
 
-                    # Decision point: Save/Upload only if content was not blocked and valid text was extracted
+                    # Decision point: Save/Upload only if content was not blocked AND valid text was extracted
                     if response_text and not content_blocked:
                         base_name = os.path.splitext(file_name)[0]
                         output_md_local_path = os.path.join(LOCAL_OUTPUT_DIR, f"{base_name}.md")
@@ -403,12 +431,12 @@ try:
 
                     else: # Handle case where response_text is None or content was blocked
                         if content_blocked:
-                             print(f"Skipping saving/uploading for {file_name} due to content blocking.")
+                             print(f"Skipping saving/uploading for {file_name} due to content blocking or minimal output.")
                              # Decide if you want to treat a blocked response as 'processed' or retry
                              # processed_file_paths.add(dropbox_watch_file_path) # Uncomment to mark blocked as processed
                              # print(f"Marked '{dropbox_watch_file_path}' as processed (blocked).")
-                        else: # This covers cases where response_text is None for other reasons
-                             print(f"Gemini generated empty or invalid text content for {file_name}. No output files generated.")
+                        else: # This covers cases where response_text is None for other reasons (e.g. extraction error)
+                             print(f"Gemini generated empty or invalid text content for {file_name} (not explicitly blocked). No output files generated.")
 
                         # Clean up Gemini file object if it exists and wasn't deleted by failed processing check
                         if file_obj and hasattr(file_obj, 'name'):
