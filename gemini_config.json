@@ -2,9 +2,9 @@
   "model_name": "models/gemini-1.5-pro-latest",
   "generation_config": {
     "temperature": 0.3,
-    "top_p": 0.9,
-    "stop_sequences": ["\n**"],
-    "max_output_tokens": null
+    "top_p": 0.9
+    // Removed "stop_sequences": ["\n**"]
+    // max_output_tokens: null
   },
   "processing_timeout_seconds": 1800
 }
