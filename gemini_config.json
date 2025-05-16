@@ -3,8 +3,9 @@
   "generation_config": {
     "temperature": 0.3,
     "top_p": 0.9
-    // Removed "stop_sequences": ["\n**"]
-    // max_output_tokens: null
+    // If you want to add max_output_tokens later, add a comma after top_p:
+    // "top_p": 0.9,
+    // "max_output_tokens": 1000
   },
   "processing_timeout_seconds": 1800
 }
