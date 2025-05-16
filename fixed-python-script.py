@@ -1,5 +1,5 @@
 import os
-import json # Need json to read config
+import json
 import time
 # glob is not used, can remove if desired
 # import glob
@@ -12,7 +12,7 @@ import mimetypes
 
 # --- Import missing datetime objects ---
 from datetime import datetime, timedelta
-from google.generativeai import GenerationConfig # Imported GenerationConfig
+from google.generativeai import GenerationConfig
 
 
 # --- Configuration ---
@@ -176,6 +176,31 @@ except Exception as e:
 try:
     genai.configure(api_key=GEMINI_API_KEY)
     print("Successfully configured Gemini API.")
+
+    # --- Temporarily list available models for debugging ---
+    # *** YOU WILL REMOVE THIS BLOCK AFTER YOU IDENTIFY THE CORRECT MODEL NAME ***
+    print("\n--- Available Models (for debugging) ---")
+    try:
+        available_models = list(genai.list_models())
+        found_suitable_model = False
+        if not available_models:
+             print("No models listed.")
+        else:
+            for m in available_models:
+                # Only print models that support generateContent, as that's what we need
+                if 'generateContent' in m.supported_generation_methods:
+                    print(f"- {m.name} (Supported methods: {m.supported_generation_methods})")
+                    # Optional: Check if it's a 1.5 model or has a large context, just for info
+                    if '1.5' in m.name or (hasattr(m, 'input_token_limit') and m.input_token_limit > 1000000): # Check for large context too
+                         found_suitable_model = True
+            if not found_suitable_model:
+                 print("Warning: No large-context (e.g. 1.5) model found that supports generateContent.")
+        print("------------------------------------\n")
+    except Exception as e:
+        print(f"Error listing models: {e}")
+    # --- End of temporary diagnostic block ---
+
+
 except Exception as e:
     print(f"Error configuring Gemini API: {e}")
     exit(1)
@@ -342,20 +367,24 @@ try:
                     )
 
                     response_text = None
+                    # Accessing response.text directly might raise an exception, check candidates first
                     if response and hasattr(response, 'candidates') and response.candidates:
-                        candidate = response.candidates[0]
-                        if hasattr(candidate, 'content') and candidate.content and hasattr(candidate.content, 'parts') and candidate.content.parts:
+                         candidate = response.candidates[0]
+                         if hasattr(candidate, 'content') and candidate.content and hasattr(candidate.content, 'parts') and candidate.content.parts:
+                             # Try extracting text from parts
                              try:
                                  response_text = ''.join(p.text for p in candidate.content.parts if hasattr(p, 'text'))
                              except Exception as text_extract_e:
                                  print(f"Warning: Error extracting text from response parts: {text_extract_e}")
-                                 response_text = None
+                                 response_text = None # Ensure None if extraction fails
 
-                        if not response_text and hasattr(candidate, 'safety_ratings') and candidate.safety_ratings:
-                            print(f"Gemini generation blocked due to safety policy. Ratings: {candidate.safety_ratings}")
+                         # Check safety ratings if text wasn't extracted
+                         if not response_text and hasattr(candidate, 'safety_ratings') and candidate.safety_ratings:
+                             print(f"Gemini generation blocked due to safety policy. Ratings: {candidate.safety_ratings}")
+                             # Decide if you want to raise an error here or just log and skip saving/uploading
 
 
-                    if response_text:
+                    if response_text: # Process the extracted text
                         base_name = os.path.splitext(file_name)[0]
                         output_md_local_path = os.path.join(LOCAL_OUTPUT_DIR, f"{base_name}.md")
                         output_html_local_path = os.path.join(LOCAL_OUTPUT_DIR, f"{base_name}.html")
@@ -383,11 +412,12 @@ try:
                         else:
                             print(f"Upload failed for one or both output files for {file_name}. NOT marking as fully processed in this run.")
 
-                    else:
+                    else: # Handle case where response_text is None (e.g., blocked)
                         print(f"Gemini generated empty or invalid text content for {file_name}. No output files generated.")
                         if file_obj and hasattr(file_obj, 'name'):
                             try: genai.delete_file(file_obj.name)
                             except Exception as delete_e: print(f"Error deleting Gemini file {file_obj.name} after empty response: {delete_e}")
+
 
                 except Exception as content_gen_e:
                     print(f"Error during Gemini content generation, saving, or upload for {file_name}: {content_gen_e}")
