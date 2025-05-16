@@ -4,6 +4,4 @@ Analyze the video content and generate a structured description focusing on the 
 
 EXAMPLE TEXT:
 
-```
 [INSERT_EXAMPLE_TEXT_HERE]
-```
