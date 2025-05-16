@@ -9,7 +9,6 @@ Troubleshooting issues with interior elevations in architectural design software
 [2:17] Suggestion to review the elevations
 [2:37] Demonstration of the issue in the software
 [3:46] Troubleshooting begins, focusing on section depth
-[x:xx] End of video content
 
 **Detailed Description of Key Processes:**
 
